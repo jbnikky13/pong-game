@@ -1,201 +1,153 @@
-// Canvas setup
 const canvas = document.getElementById('pongCanvas');
 const ctx = canvas.getContext('2d');
+const menu = document.getElementById('menu');
+const game = document.getElementById('game');
+const gameOver = document.getElementById('gameOver');
+const pauseOverlay = document.getElementById('pauseOverlay');
+const statusEl = document.getElementById('status');
 
-// Game objects
-const paddle = {
-    width: 10,
-    height: 80,
-    x: 10,
-    y: canvas.height / 2 - 40,
-    speed: 6,
-    dy: 0
-};
-
-const aiPaddle = {
-    width: 10,
-    height: 80,
-    x: canvas.width - 20,
-    y: canvas.height / 2 - 40,
-    speed: 5
-};
-
-const ball = {
-    x: canvas.width / 2,
-    y: canvas.height / 2,
-    radius: 7,
-    dx: 5,
-    dy: 5,
-    speed: 5
-};
-
-let playerScore = 0;
-let aiScore = 0;
-
-// Input handling
+let difficulty = 'normal', targetScore = 5, running = false, paused = false;
+let playerScore = 0, aiScore = 0, rally = 0, bestRally = 0, pointsWon = 0;
+let soundOn = true, audioCtx;
 const keys = {};
-let mouseY = canvas.height / 2;
+let pointerY = canvas.height / 2;
 
-document.addEventListener('keydown', (e) => {
-    keys[e.key] = true;
-});
+const player = { x: 22, y: 210, w: 12, h: 80, speed: 8 };
+const ai = { x: canvas.width - 34, y: 210, w: 12, h: 80, speed: 5.2 };
+const ball = { x: 450, y: 250, r: 8, vx: 5, vy: 2.5, maxSpeed: 12 };
 
-document.addEventListener('keyup', (e) => {
-    keys[e.key] = false;
-});
-
-canvas.addEventListener('mousemove', (e) => {
-    const rect = canvas.getBoundingClientRect();
-    mouseY = e.clientY - rect.top;
-});
-
-// Update player paddle position
-function updatePlayerPaddle() {
-    // Arrow keys control
-    if (keys['ArrowUp'] || keys['w'] || keys['W']) {
-        paddle.y -= paddle.speed;
-    }
-    if (keys['ArrowDown'] || keys['s'] || keys['S']) {
-        paddle.y += paddle.speed;
-    }
-
-    // Mouse control
-    const targetY = mouseY - paddle.height / 2;
-    paddle.y += (targetY - paddle.y) * 0.1; // Smooth mouse following
-
-    // Collision with top and bottom walls
-    if (paddle.y < 0) {
-        paddle.y = 0;
-    }
-    if (paddle.y + paddle.height > canvas.height) {
-        paddle.y = canvas.height - paddle.height;
-    }
+function beep(freq = 440, duration = 0.05) {
+  if (!soundOn) return;
+  try {
+    audioCtx ||= new (window.AudioContext || window.webkitAudioContext)();
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.frequency.value = freq;
+    gain.gain.value = 0.035;
+    osc.connect(gain); gain.connect(audioCtx.destination);
+    osc.start(); osc.stop(audioCtx.currentTime + duration);
+  } catch (_) {}
 }
 
-// Update AI paddle position
-function updateAIPaddle() {
-    const paddleCenter = aiPaddle.y + aiPaddle.height / 2;
-    const difficulty = 0.08; // Adjust for difficulty (0-1)
-
-    // AI follows the ball with some imperfection
-    if (paddleCenter < ball.y - 35) {
-        aiPaddle.y += aiPaddle.speed * (1 - difficulty * 0.5);
-    } else if (paddleCenter > ball.y + 35) {
-        aiPaddle.y -= aiPaddle.speed * (1 - difficulty * 0.5);
-    }
-
-    // Collision with top and bottom walls
-    if (aiPaddle.y < 0) {
-        aiPaddle.y = 0;
-    }
-    if (aiPaddle.y + aiPaddle.height > canvas.height) {
-        aiPaddle.y = canvas.height - aiPaddle.height;
-    }
+function resetBall(direction = Math.random() > .5 ? 1 : -1) {
+  ball.x = canvas.width / 2; ball.y = canvas.height / 2;
+  ball.vx = direction * 5; ball.vy = (Math.random() - .5) * 5;
+  rally = 0;
 }
 
-// Ball physics and collision detection
+function resetMatch() {
+  playerScore = aiScore = 0; pointsWon = 0; bestRally = 0; rally = 0;
+  player.y = ai.y = canvas.height / 2 - 40;
+  resetBall(); updateScore();
+}
+
+function updateScore() {
+  document.getElementById('playerScore').textContent = playerScore;
+  document.getElementById('aiScore').textContent = aiScore;
+  document.getElementById('targetDisplay').textContent = targetScore;
+}
+
+function clampPaddles() {
+  player.y = Math.max(0, Math.min(canvas.height - player.h, player.y));
+  ai.y = Math.max(0, Math.min(canvas.height - ai.h, ai.y));
+}
+
+function updatePlayer() {
+  if (keys.ArrowUp || keys.w || keys.W) player.y -= player.speed;
+  if (keys.ArrowDown || keys.s || keys.S) player.y += player.speed;
+  const target = pointerY - player.h / 2;
+  if (Math.abs(pointerY - canvas.height / 2) > 8) player.y += (target - player.y) * 0.16;
+}
+
+function updateAI() {
+  const settings = { easy: [3.6, 55], normal: [5.2, 28], hard: [7.2, 10] }[difficulty];
+  const [speed, margin] = settings;
+  const center = ai.y + ai.h / 2;
+  if (center < ball.y - margin) ai.y += speed;
+  else if (center > ball.y + margin) ai.y -= speed;
+}
+
+function paddleHit(p) {
+  return ball.x - ball.r < p.x + p.w && ball.x + ball.r > p.x && ball.y > p.y && ball.y < p.y + p.h;
+}
+
+function hitPaddle(p, direction) {
+  const relative = (ball.y - (p.y + p.h / 2)) / (p.h / 2);
+  const speed = Math.min(Math.hypot(ball.vx, ball.vy) * 1.055, ball.maxSpeed);
+  ball.vx = direction * Math.sqrt(Math.max(16, speed * speed - (relative * speed * 0.9) ** 2));
+  ball.vy = relative * speed * 0.9;
+  ball.x = direction > 0 ? p.x + p.w + ball.r : p.x - ball.r;
+  rally++; bestRally = Math.max(bestRally, rally); beep(650, 0.035);
+}
+
+function scorePoint(side) {
+  if (side === 'player') { playerScore++; pointsWon++; beep(880, 0.12); }
+  else { aiScore++; beep(180, 0.12); }
+  updateScore();
+  if (playerScore >= targetScore || aiScore >= targetScore) return finishMatch();
+  statusEl.textContent = side === 'player' ? 'POINT PLAYER' : 'POINT AI';
+  resetBall(side === 'player' ? 1 : -1);
+}
+
 function updateBall() {
-    ball.x += ball.dx;
-    ball.y += ball.dy;
-
-    // Top and bottom wall collision
-    if (ball.y - ball.radius < 0 || ball.y + ball.radius > canvas.height) {
-        ball.dy = -ball.dy;
-        ball.y = ball.y - ball.radius < 0 ? ball.radius : canvas.height - ball.radius;
-    }
-
-    // Player paddle collision
-    if (
-        ball.x - ball.radius < paddle.x + paddle.width &&
-        ball.y > paddle.y &&
-        ball.y < paddle.y + paddle.height
-    ) {
-        ball.dx = -ball.dx;
-        ball.x = paddle.x + paddle.width + ball.radius;
-
-        // Add spin based on where ball hits paddle
-        const hitPos = (ball.y - (paddle.y + paddle.height / 2)) / (paddle.height / 2);
-        ball.dy += hitPos * 2;
-    }
-
-    // AI paddle collision
-    if (
-        ball.x + ball.radius > aiPaddle.x &&
-        ball.y > aiPaddle.y &&
-        ball.y < aiPaddle.y + aiPaddle.height
-    ) {
-        ball.dx = -ball.dx;
-        ball.x = aiPaddle.x - ball.radius;
-
-        // Add spin based on where ball hits paddle
-        const hitPos = (ball.y - (aiPaddle.y + aiPaddle.height / 2)) / (aiPaddle.height / 2);
-        ball.dy += hitPos * 2;
-    }
-
-    // Scoring - ball goes out of bounds
-    if (ball.x - ball.radius < 0) {
-        aiScore++;
-        document.getElementById('aiScore').textContent = aiScore;
-        resetBall();
-    }
-    if (ball.x + ball.radius > canvas.width) {
-        playerScore++;
-        document.getElementById('playerScore').textContent = playerScore;
-        resetBall();
-    }
+  ball.x += ball.vx; ball.y += ball.vy;
+  if (ball.y - ball.r <= 0 || ball.y + ball.r >= canvas.height) {
+    ball.vy *= -1; ball.y = Math.max(ball.r, Math.min(canvas.height - ball.r, ball.y)); beep(300, 0.025);
+  }
+  if (ball.vx < 0 && paddleHit(player)) hitPaddle(player, 1);
+  if (ball.vx > 0 && paddleHit(ai)) hitPaddle(ai, -1);
+  if (ball.x < -ball.r) scorePoint('ai');
+  if (ball.x > canvas.width + ball.r) scorePoint('player');
 }
 
-// Reset ball to center
-function resetBall() {
-    ball.x = canvas.width / 2;
-    ball.y = canvas.height / 2;
-    ball.dx = (Math.random() > 0.5 ? 1 : -1) * ball.speed;
-    ball.dy = (Math.random() - 0.5) * ball.speed;
+function draw() {
+  ctx.fillStyle = '#05070d'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.strokeStyle = 'rgba(255,255,255,.13)'; ctx.setLineDash([12, 14]); ctx.beginPath(); ctx.moveTo(canvas.width/2, 0); ctx.lineTo(canvas.width/2, canvas.height); ctx.stroke(); ctx.setLineDash([]);
+  ctx.shadowBlur = 18; ctx.fillStyle = '#63ffda'; ctx.shadowColor = '#63ffda'; ctx.fillRect(player.x, player.y, player.w, player.h);
+  ctx.fillStyle = '#ff5c8a'; ctx.shadowColor = '#ff5c8a'; ctx.fillRect(ai.x, ai.y, ai.w, ai.h);
+  ctx.fillStyle = '#fff'; ctx.shadowColor = '#fff'; ctx.beginPath(); ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI * 2); ctx.fill(); ctx.shadowBlur = 0;
 }
 
-// Draw functions
-function drawPaddle(paddleObj, color) {
-    ctx.fillStyle = color;
-    ctx.fillRect(paddleObj.x, paddleObj.y, paddleObj.width, paddleObj.height);
+function loop() {
+  if (running && !paused) { updatePlayer(); updateAI(); clampPaddles(); updateBall(); }
+  draw(); requestAnimationFrame(loop);
 }
 
-function drawBall() {
-    ctx.fillStyle = '#00ff00';
-    ctx.beginPath();
-    ctx.arc(ball.x, ball.y, ball.radius, 0, Math.PI * 2);
-    ctx.fill();
+function startGame() {
+  menu.classList.add('hidden'); gameOver.classList.add('hidden'); game.classList.remove('hidden');
+  resetMatch(); running = true; paused = false; pauseOverlay.classList.add('hidden'); statusEl.textContent = 'FIGHT!';
+}
+function finishMatch() {
+  running = false; game.classList.add('hidden'); gameOver.classList.remove('hidden');
+  const won = playerScore > aiScore;
+  document.getElementById('winnerText').textContent = won ? 'PLAYER WINS' : 'AI WINS';
+  document.getElementById('finalScore').textContent = `${playerScore} — ${aiScore}`;
+  document.getElementById('rallyStat').textContent = bestRally;
+  document.getElementById('pointsStat').textContent = pointsWon;
+}
+function togglePause() {
+  if (!running) return; paused = !paused; pauseOverlay.classList.toggle('hidden', !paused); statusEl.textContent = paused ? 'PAUSED' : 'FIGHT!';
 }
 
-function drawCenterLine() {
-    ctx.strokeStyle = 'rgba(0, 255, 0, 0.3)';
-    ctx.setLineDash([10, 10]);
-    ctx.beginPath();
-    ctx.moveTo(canvas.width / 2, 0);
-    ctx.lineTo(canvas.width / 2, canvas.height);
-    ctx.stroke();
-    ctx.setLineDash([]);
+window.addEventListener('keydown', e => {
+  keys[e.key] = true;
+  if (['ArrowUp','ArrowDown',' '].includes(e.key)) e.preventDefault();
+  if (e.key.toLowerCase() === 'p') togglePause();
+});
+window.addEventListener('keyup', e => keys[e.key] = false);
+function setPointer(e) {
+  const rect = canvas.getBoundingClientRect(); pointerY = (e.clientY - rect.top) * (canvas.height / rect.height);
 }
+canvas.addEventListener('mousemove', setPointer);
+canvas.addEventListener('touchmove', e => { e.preventDefault(); setPointer(e.touches[0]); }, { passive: false });
 
-function drawGame() {
-    // Clear canvas
-    ctx.fillStyle = '#000';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
+for (const btn of document.querySelectorAll('.mode-btn')) btn.onclick = () => { document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active')); btn.classList.add('active'); difficulty = btn.dataset.difficulty; };
+for (const btn of document.querySelectorAll('.target-btn')) btn.onclick = () => { document.querySelectorAll('.target-btn').forEach(b => b.classList.remove('active')); btn.classList.add('active'); targetScore = Number(btn.dataset.target); };
+document.getElementById('startBtn').onclick = startGame;
+document.getElementById('rematchBtn').onclick = startGame;
+document.getElementById('menuBtn').onclick = () => { gameOver.classList.add('hidden'); menu.classList.remove('hidden'); };
+document.getElementById('quitBtn').onclick = () => { running = false; game.classList.add('hidden'); menu.classList.remove('hidden'); };
+document.getElementById('pauseBtn').onclick = togglePause;
+document.getElementById('soundBtn').onclick = e => { soundOn = !soundOn; e.currentTarget.textContent = soundOn ? '🔊' : '🔇'; };
 
-    // Draw game elements
-    drawCenterLine();
-    drawPaddle(paddle, '#00ff00');
-    drawPaddle(aiPaddle, '#ff0000');
-    drawBall();
-}
-
-// Main game loop
-function gameLoop() {
-    updatePlayerPaddle();
-    updateAIPaddle();
-    updateBall();
-    drawGame();
-    requestAnimationFrame(gameLoop);
-}
-
-// Start the game
-gameLoop();
+updateScore(); draw(); loop();
